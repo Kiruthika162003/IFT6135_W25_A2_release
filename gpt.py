@@ -45,11 +45,11 @@ class LayerNorm(nn.Module):
             The output tensor, having the same shape as `inputs`.
         """
 
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-        
-        raise NotImplementedError
+        mean = inputs.mean(-1, keepdim=True)
+        std = inputs.std(-1, keepdim=True)
+        outputs = (inputs - mean) / (std + self.eps)
+        outputs = self.weight * outputs + self.bias
+        return outputs
 
     def reset_parameters(self):
         nn.init.ones_(self.weight)
@@ -114,11 +114,12 @@ class MultiHeadedAttention(nn.Module):
             should not influence on the 6th token (7 > 5).
         """
 
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-
-        raise NotImplementedError
+        d_k = queries.size(-1)
+        scores = torch.matmul(queries, keys.transpose(-2, -1)) / math.sqrt(d_k)
+        mask = torch.tril(torch.ones(scores.size(-2), scores.size(-1))).to(scores.device)
+        scores = scores.masked_fill(mask == 0, -1e9)
+        attention_weights = F.softmax(scores, dim=-1)
+        return attention_weights
 
     def apply_attention(self, queries, keys, values):
         """
@@ -176,11 +177,11 @@ class MultiHeadedAttention(nn.Module):
             
         """
 
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-
-        raise NotImplementedError
+        attention_weights = self.get_attention_weights(queries, keys)
+        attended_values = torch.matmul(attention_weights, values)
+        attn_weights = attention_weights.clone().detach()
+        outputs = attended_values.view(attended_values.size(0), -1, self.num_heads * self.head_size)
+        return outputs, attn_weights
 
 
     def split_heads(self, tensor):
@@ -204,11 +205,10 @@ class MultiHeadedAttention(nn.Module):
             Here `dim` is the same dimension as the one in the definition of the input `tensor` above.
         """
 
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-
-        raise NotImplementedError
+        batch_size, sequence_length, dim = tensor.size()
+        tensor = tensor.view(batch_size, sequence_length, self.num_heads, dim // self.num_heads)
+        tensor = tensor.permute(0, 2, 1, 3)
+        return tensor
 
     def merge_heads(self, tensor):
         """
@@ -232,11 +232,10 @@ class MultiHeadedAttention(nn.Module):
             Here `dim` is the same dimension as the one in the definition of the input `tensor` above.
         """
 
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-        
-        raise NotImplementedError
+        batch_size, num_heads, sequence_length, dim = tensor.size()
+        tensor = tensor.permute(0, 2, 1, 3).contiguous()
+        tensor = tensor.view(batch_size, sequence_length, num_heads * dim)
+        return tensor
 
     def forward(self,  queries: Tensor, keys: Tensor, values: Tensor):
         """
@@ -290,16 +289,14 @@ class MultiHeadedAttention(nn.Module):
             purposes only, and it is not used in the computation graph for
             backpropagation. It is returned here for debugging purposes.
         """
-
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
         
-        raise NotImplementedError
+        queries = self.split_heads(self.W_Q(queries))
+        keys = self.split_heads(self.W_K(keys))
+        values = self.split_heads(self.W_V(values))
 
-        # Use clone().detach() to detach attn_weights from the computation graph
-        # Since we don't need to backpropagate through them, we can detach them from the graph
-        
+        context, attn_weights = self.apply_attention(queries, keys, values)
+        outputs = self.W_O(context)
+        return outputs, attn_weights
 
 ########################################################################################
 ########################################################################################
@@ -429,171 +426,3 @@ class GPTEmbedding(nn.Module):
         super(GPTEmbedding, self).__init__()
 
         self.tokens = nn.Embedding(vocabulary_size, embedding_size, padding_idx=padding_index)  # type: ignore
-
-        self.register_buffer(
-            "position_encoding", 
-            self.create_sinusoidal_embeddings(
-                n_positions=n_max_positions, dimension=embedding_size
-            ) # (n_max_positions, embedding_size)
-        )
-
-    @classmethod
-    def create_sinusoidal_embeddings(self, n_positions: int, dimension: int) -> torch.FloatTensor:
-        """
-        Create the sinusoidal embeddings.
-        PE(pos, i) = sin(pos / 10000^((i//2)/dimension)) if i is even
-                   = cos(pos / 10000^((i//2)/dimension)) if i is odd
-
-        Parameters
-        ----------
-        n_positions : int
-            The number of positions to consider.
-        dimension : int
-            The size of the embeddings.
-        
-        Returns
-        -------
-        position_enc (`torch.FloatTensor` of shape `(n_positions, dimension)`)
-            The tensor containing the positional embeddings.
-        """
-
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-
-        raise NotImplementedError
-
-
-    def forward(self, tokens: Tensor) -> Tensor:
-        """
-        Return the embeddings from a sequence of input tokens 
-        
-        Parameters
-        ----------
-        tokens (`torch.LongTensor` of shape `(batch_size, sequence_length)`)
-            The input tensor containing the token sequences. All the tokens
-            must be integers in [0, vocabulary_size).
-
-        Returns
-        -------
-        embeddings (`torch.FloatTensor` of shape `(batch_size, sequence_length, embedding_size)`)
-            The tensor containing the embeddings. For example, `embeddings[0, 2]`
-            is the embedding vector for the token in 3rd position (index 2)
-            of the 1st sequence in the batch (index 0).
-        
-        """
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-        
-        raise NotImplementedError
-
-########################################################################################
-########################################################################################
-  
-class GPT(nn.Module):
-    def __init__(
-        self,
-        num_heads: int, 
-        num_layers: int,
-        embedding_size : int,
-        vocabulary_size : int,
-        sequence_length : int,
-        multiplier: float = 4,
-        dropout: float = 0.0,
-        non_linearity: str = "gelu",
-        padding_index:int = None,
-        bias_attention:bool=True,
-        bias_classifier:bool=True,
-        share_embeddings:bool=False
-    ) -> None:
-        super().__init__()
-
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.embedding_size = embedding_size
-        self.vocabulary_size = vocabulary_size
-        self.sequence_length = sequence_length
-        self.non_linearity = non_linearity
-
-        self.embedding = GPTEmbedding(
-            vocabulary_size = vocabulary_size,
-            embedding_size = embedding_size,
-            n_max_positions = sequence_length,
-            padding_index = padding_index
-        ) 
-
-        
-        self.decoder = Decoder(
-            d_model = embedding_size,
-            num_heads = num_heads,
-            num_blocks = num_layers,
-            multiplier = multiplier,
-            dropout = dropout,
-            non_linearity = non_linearity,
-            bias = bias_attention
-        )
-
-        self.classifier = nn.Linear(embedding_size, vocabulary_size, bias=bias_classifier)
-
-        # Tying classifier and embedding weights
-        if share_embeddings:            
-            self.classifier.weight = self.embedding.tokens.weight
-  
-    def forward(self, x: Tensor) -> Tuple[Tensor, Union[Tensor, None], Union[Tensor, None]]:
-        """
-        parameters:
-            x : (batch_size, sequence_length,)
-            vocab indices of decoder input token sequence
-
-        returns:
-            logits : (batch_size, sequence_length, vocab_size)
-            (hidden_states, attentions) :  
-                (batch_size, sequence_length, embedding_dimension) 
-                and 
-                (batch_size, num_layers, num_heads, sequence_length, sequence_length)
-        """
-
-        raise NotImplementedError
-
-########################################################################################
-########################################################################################
-
-if __name__ == "__main__":
-    
-    # Data
-    vocabulary_size=4
-    batch_size, sequence_length = 10, 5
-    sequences = torch.Tensor(batch_size, sequence_length+1).uniform_(1, vocabulary_size).long() # (batch_size, sequence_length+1)
-    mask = torch.ones(batch_size, sequence_length, dtype=torch.long) # (batch_size, sequence_length)
-    for i in range(batch_size) :
-        seq_len = torch.randint(low=2, high=sequence_length, size=(1,))[0]
-        mask[i,seq_len:] = 0
-        sequences[i,seq_len:] = 0
-    # next sentence prediction
-    inputs = sequences[:,:-1] # (batch_size, sequence_length)
-    targets = sequences[:,1:] # (batch_size, sequence_length)
-
-    # Model 
-    embedding_size=6
-    num_heads=2
-    num_layers=4
-    assert embedding_size % num_heads == 0
-
-    model = GPT(
-        num_heads, 
-        num_layers,
-        embedding_size,
-        vocabulary_size,
-        sequence_length,
-        multiplier = 4,
-        dropout = 0.0,
-        non_linearity = "gelu",
-        padding_index = None,
-        bias_attention=True,
-        bias_classifier=False,
-        share_embeddings=False
-    )
-
-    logits, (hidden_states, attentions) = model(inputs)
-    print(logits.shape, hidden_states.shape, attentions.shape)   
