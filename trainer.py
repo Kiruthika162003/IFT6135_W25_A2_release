@@ -49,19 +49,41 @@ def get_loss_and_accuracy(logits, targets, eq_positions, mask, reduction='mean')
         The accuracy over the batch where a sequence is counted as correct only if 
         all valid RHS tokens are predicted correctly.
     """
-    # ==========================
-    # TODO: Write your code here
-    # ==========================
+    B, S, V = logits.shape
+    rhs_mask = mask.clone()
+    
+    # Mask positions before "=" token
+    for i in range(B):
+        rhs_mask[i, :eq_positions[i]+1] = 0
+    
+    # Calculate loss
+    log_probs = F.log_softmax(logits, dim=-1)
+    rhs_loss = F.nll_loss(log_probs.transpose(1, 2), targets, reduction='none')
+    rhs_loss = rhs_loss * rhs_mask
+    if reduction == 'mean':
+        loss = rhs_loss.sum() / rhs_mask.sum()
+    elif reduction == 'sum':
+        loss = rhs_loss.sum()
+    else:
+        loss = rhs_loss.sum(dim=1)
 
-    raise NotImplementedError
-
+    # Calculate accuracy
+    preds = logits.argmax(dim=-1)
+    correct_preds = (preds == targets) * rhs_mask
+    correct_sequences = correct_preds.sum(dim=1) == rhs_mask.sum(dim=1)
+    accuracy = correct_sequences.float()
+    if reduction == 'mean':
+        accuracy = accuracy.mean()
+    elif reduction == 'sum':
+        accuracy = accuracy.sum()
+    
     return loss, accuracy
 
 ########################################################################################
 ########################################################################################
-  
+
 @torch.no_grad()
-def eval_model(model, loader, device) :
+def eval_model(model, loader, device):
     model.eval()
     acc = 0
     loss = 0
@@ -75,23 +97,17 @@ def eval_model(model, loader, device) :
         loss += batch_loss.item() * batch_x.shape[0]
         acc += batch_acc * batch_x.shape[0]
 
+    return {"loss": loss / n, "accuracy": acc / n}
 
-    ##########
-    # You can add more metrics in the dictionary (e.g., l2 norm of the parameters, etc.) 
-    ##########
-
-    return {"loss" : loss / n, "accuracy": acc / n}
-    
 ########################################################################################
 ########################################################################################
-
 
 def train(
     model, train_loader, train_loader_for_eval, test_loader, optimizer, scheduler, device, 
-    exp_name:str, checkpoint_path:str,
-    n_steps:int, eval_first:int=0, eval_period:int=1, print_step:int=1, save_model_step:int=1,  save_statistic_step:int=1,  
+    exp_name: str, checkpoint_path: str,
+    n_steps: int, eval_first: int = 0, eval_period: int = 1, print_step: int = 1, save_model_step: int = 1, save_statistic_step: int = 1,  
     verbose=True,
-    ):
+):
     """
     model (nn.Module) : The model to train
     train_loader (DataLoader) : Training data loader
@@ -109,155 +125,119 @@ def train(
     save_statistic_step (int) : Step interval to save statistics (train/test loss, accuracy, etc.)
     verbose (bool) : Verbosity of the training
     """
-
-    ##############
-    # Checkpoint path
     os.makedirs(checkpoint_path, exist_ok=True)
 
-    ##############
-    # Number of training epochs
     total_epochs = (n_steps + len(train_loader) - 1) // len(train_loader)
     n_steps = total_epochs * len(train_loader)
     
-    if verbose :
+    if verbose:
         print(f"Number of training epochs & steps: {total_epochs} {n_steps}")
 
-    ##############
-
-    all_metrics = defaultdict(lambda: []) # {metric : [value at step 1, ... ]}
-    all_metrics["train"] = defaultdict(lambda: []) # {metric : [value at step 1, ... ]}
-    all_metrics["test"] = defaultdict(lambda: []) # {metric : [value at step 1, ... ]}
+    all_metrics = defaultdict(lambda: [])  # {metric : [value at step 1, ... ]}
+    all_metrics["train"] = defaultdict(lambda: [])  # {metric : [value at step 1, ... ]}
+    all_metrics["test"] = defaultdict(lambda: [])  # {metric : [value at step 1, ... ]}
     all_metrics["steps_epoch"] = {}
 
-    ##############
-
     train_statistics = eval_model(model, train_loader_for_eval, device)
-    for k, v in train_statistics.items() :
+    for k, v in train_statistics.items():
         all_metrics["train"][k].append(v)
 
-    test_statistics = eval_model(model, test_loader, device) 
-    for k, v in test_statistics.items() :
+    test_statistics = eval_model(model, test_loader, device)
+    for k, v in test_statistics.items():
         all_metrics["test"][k].append(v)
 
     all_metrics["all_steps"].append(0)
     all_metrics["steps_epoch"][0] = 0
 
-
-    ######################
-    # Save model
     state = {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
     }
     torch.save(state, f"{checkpoint_path}/{exp_name}_state_{0}_acc={test_statistics['accuracy']}_loss={test_statistics['loss']}.pth")
-  
-    
-    ##############
 
     current_lr = scheduler.optimizer.param_groups[0]["lr"]
-    if verbose :
+    if verbose:
         to_print = "\n" + " | ".join(f"Train {k} : {v:.6f}" for k, v in train_statistics.items())
         to_print += " | " + " | ".join(f"Test {k} : {v:.6f}" for k, v in test_statistics.items())
         to_print += f" | lr = {current_lr}"
         print(to_print)
 
-    ##############
-
-    cur_step = 1 
+    cur_step = 1
     tol_step = 0
 
-    for epoch in tqdm(range(1, total_epochs+1), desc="Training", total=total_epochs):
+    for epoch in tqdm(range(1, total_epochs + 1), desc="Training", total=total_epochs):
 
-        # start_time = time.time()
-        
-        for i, batch in enumerate(train_loader) :
-            batch_x, batch_y, eq_positions, mask = batch # (B, S), (B, S), (B,), (B, S)
+        for i, batch in enumerate(train_loader):
+            batch_x, batch_y, eq_positions, mask = batch  # (B, S), (B, S), (B,), (B, S)
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
 
             optimizer.zero_grad(set_to_none=True)
             model.train()
 
-            logits, *_ = model(batch_x) # (B, S, V)
+            logits, *_ = model(batch_x)  # (B, S, V)
             loss, _ = get_loss_and_accuracy(logits, batch_y, eq_positions, mask)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            # ==========================
-            # TODO: Write your code here
-            # ==========================
-            # scheduler.step()
-            # current_lr = scheduler.optimizer.param_groups[0]["lr"]
-            # ==========================
-            # ==========================
-              
+            scheduler.step()
+            current_lr = scheduler.optimizer.param_groups[0]["lr"]
+
             if cur_step in [1, n_steps] or cur_step % eval_period == 0 or cur_step <= eval_first:
                 train_statistics = eval_model(model, train_loader_for_eval, device)
-                for k, v in train_statistics.items() : all_metrics["train"][k].append(v)
+                for k, v in train_statistics.items():
+                    all_metrics["train"][k].append(v)
 
                 test_statistics = eval_model(model, test_loader, device)
-                for k, v in test_statistics.items() : all_metrics["test"][k].append(v)
+                for k, v in test_statistics.items():
+                    all_metrics["test"][k].append(v)
 
                 all_metrics["all_steps"].append(cur_step)
                 all_metrics["steps_epoch"][cur_step] = epoch
 
-            
-            if  verbose and (cur_step in [1, n_steps] or cur_step%print_step==0) :
+            if verbose and (cur_step in [1, n_steps] or cur_step % print_step == 0):
                 to_print = "\n" + " | ".join(f"Train {k} : {v:.6f}" for k, v in train_statistics.items())
                 to_print += " | " + " | ".join(f"Test {k} : {v:.6f}" for k, v in test_statistics.items())
                 to_print += f" | lr = {current_lr}"
                 print(to_print)
 
-            if cur_step in [1, n_steps] or cur_step%save_model_step==0 or cur_step <= eval_first : 
+            if cur_step in [1, n_steps] or cur_step % save_model_step == 0 or cur_step <= eval_first:
                 state = {
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                 }
                 torch.save(state, f"{checkpoint_path}/{exp_name}_state_{cur_step}_acc={test_statistics['accuracy']}_loss={test_statistics['loss']}.pth")
-                
 
-            if cur_step in [1, n_steps] or cur_step%save_statistic_step==0:
-                #to_save = {k:v for k, v in all_metrics.items()}
-                to_save = {k: dict(v) if isinstance(v, defaultdict) else v for k, v in all_metrics.items()} # to avoid issues with lambda
+            if cur_step in [1, n_steps] or cur_step % save_statistic_step == 0:
+                to_save = {k: dict(v) if isinstance(v, defaultdict) else v for k, v in all_metrics.items()}  # to avoid issues with lambda
                 torch.save(to_save, f"{checkpoint_path}/{exp_name}.pth")
 
             cur_step += 1
 
-        # ==========================
-        # TODO: Write your code here
-        # ==========================
-        ###
-        # scheduler.step() 
-        # current_lr = scheduler.optimizer.param_groups[0]["lr"]
-        # ==========================
-        # ==========================
+        scheduler.step()
+        current_lr = scheduler.optimizer.param_groups[0]["lr"]
 
-        ##############
-        # You can implement early stopping here.
-        # That is, if the model does not improve for a certain number of steps, you can stop the training.
-        ##############
-
-        # end_time = time.time()
-        # elapsed_time = end_time - start_time
-        # print(f"Elapsed time for one step : {elapsed_time} seconds")
+        # Implement early stopping if needed
 
     state = {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
     }
     torch.save(state, f"{checkpoint_path}/{exp_name}_state_{cur_step}_acc={test_statistics['accuracy']}_loss={test_statistics['loss']}.pth")
-    
+
     train_statistics = eval_model(model, train_loader_for_eval, device)
-    for k, v in train_statistics.items() : all_metrics["train"][k].append(v)
+    for k, v in train_statistics.items():
+        all_metrics["train"][k].append(v)
 
     test_statistics = eval_model(model, test_loader, device)
-    for k, v in test_statistics.items() : all_metrics["test"][k].append(v)
+    for k, v in test_statistics.items():
+        all_metrics["test"][k].append(v)
 
     all_metrics["all_steps"].append(cur_step)
     all_metrics["steps_epoch"][cur_step] = epoch
 
-    to_save = {k: dict(v) if isinstance(v, defaultdict) else v for k, v in all_metrics.items()} # to avoid issues with lambda
+    to_save = {k: dict(v) if isinstance(v, defaultdict) else v for k, v in all_metrics.items()}  # to avoid issues with lambda
     torch.save(to_save, f"{checkpoint_path}/{exp_name}.pth")
 
     return all_metrics
