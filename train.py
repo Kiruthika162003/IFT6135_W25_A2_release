@@ -13,9 +13,9 @@ import time
 import argparse
 
 from data import get_arithmetic_dataset
-from lstm import LSTMLM
-from gpt import GPT
-from trainer import train as train_model
+from lstm_solution import LSTMLM
+from gpt_solution import GPT
+from trainer_solution import train as train_model
 from checkpointing import get_all_checkpoints_per_trials
 from plotter import plot_loss_accs
 
